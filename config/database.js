@@ -1,0 +1,31 @@
+// backend/config/database.js
+const mysql = require('mysql2');
+
+// Create connection pool
+const pool = mysql.createPool({
+    host: 'localhost',
+    user: 'root',
+    password: 'root', // Make sure this password is correct!
+    database: 'VenuEase',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
+
+// Test connection
+pool.getConnection((err, connection) => {
+    if (err) {
+        console.error('❌ DATABASE CONNECTION FAILED:', err.message);
+        console.log('💡 Make sure:');
+        console.log('   1. MySQL is running (XAMPP/WAMP)');
+        console.log('   2. Database "VenuEase" exists');
+        console.log('   3. MySQL username/password is correct');
+        return;
+    }
+    console.log('✅ DATABASE CONNECTED: VenuEase');
+    connection.release();
+});
+
+// FIXED: Only ONE export statement
+module.exports = pool.promise();
+// Remove this line: module.exports = promisePool;
