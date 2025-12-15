@@ -12,8 +12,13 @@ const PORT = 5000;
 // ==================== MIDDLEWARE SETUP ====================
 // IMPORTANT: Order matters! Configure in this exact order:
 
-// 1. First, enable CORS
-app.use(cors());
+// 1. First, enable CORS with proper configuration
+app.use(cors({
+    origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:3001'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
 
 // 2. Configure static file serving BEFORE body parsers
 app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
@@ -57,13 +62,17 @@ const upload = multer({
 
 // ==================== HELPER FUNCTIONS ====================
 const parseImagesField = (images) => {
-    console.log('🔍 Parsing images field:', { type: typeof images, value: images });
+    console.log('🔍 parseImagesField input:', { type: typeof images, value: images });
     
-    if (!images) return [];
+    if (!images) {
+        console.log('⚠️ No images field');
+        return [];
+    }
     
     try {
         // If it's already an array, return it
         if (Array.isArray(images)) {
+            console.log('✅ Already an array:', images);
             return images.map(img => {
                 // Convert full URLs to relative paths if needed
                 if (img.startsWith('http://localhost:5000')) {
@@ -76,12 +85,17 @@ const parseImagesField = (images) => {
         // If it's a string, try to parse it
         if (typeof images === 'string') {
             const trimmed = images.trim();
-            if (!trimmed || trimmed === 'null' || trimmed === 'undefined') {
+            console.log('📝 Trimmed string:', trimmed);
+            
+            if (!trimmed || trimmed === 'null' || trimmed === 'undefined' || trimmed === '[]' || trimmed === '""') {
+                console.log('⚠️ Empty images string');
                 return [];
             }
             
             try {
+                // Try to parse as JSON
                 const parsed = JSON.parse(trimmed);
+                console.log('✅ Parsed as JSON:', parsed);
                 if (Array.isArray(parsed)) {
                     return parsed.map(img => {
                         if (img.startsWith('http://localhost:5000')) {
@@ -91,18 +105,73 @@ const parseImagesField = (images) => {
                     });
                 }
             } catch (jsonError) {
-                // Not JSON, return as single item array
-                const img = trimmed.startsWith('http://localhost:5000') 
-                    ? trimmed.replace('http://localhost:5000', '')
-                    : trimmed;
-                return [img];
+                console.log('⚠️ Not JSON, trying other formats:', jsonError.message);
+                
+                // Check if it's a single image path
+                if (trimmed.includes('/uploads/') || trimmed.includes('venue-')) {
+                    console.log('✅ Single image path detected:', trimmed);
+                    const img = trimmed.startsWith('http://localhost:5000') 
+                        ? trimmed.replace('http://localhost:5000', '')
+                        : trimmed;
+                    return [img];
+                }
+                
+                // Check if it's comma-separated
+                if (trimmed.includes(',')) {
+                    const images = trimmed.split(',').map(img => {
+                        const trimmedImg = img.trim();
+                        if (trimmedImg.startsWith('http://localhost:5000')) {
+                            return trimmedImg.replace('http://localhost:5000', '');
+                        }
+                        return trimmedImg;
+                    }).filter(img => img);
+                    console.log('✅ Comma-separated images:', images);
+                    return images;
+                }
             }
         }
     } catch (error) {
         console.error('❌ Error parsing images:', error);
     }
     
+    console.log('⚠️ Returning empty array');
     return [];
+};
+
+// Helper function to ensure proper image URLs
+const ensureImageUrl = (imagePath) => {
+    console.log('🔍 ensureImageUrl input:', imagePath, 'type:', typeof imagePath);
+    
+    if (!imagePath || imagePath === 'null' || imagePath === 'undefined' || imagePath === '' || imagePath === '[]') {
+        console.log('⚠️ No image path provided, using placeholder');
+        return 'https://via.placeholder.com/800x400?text=Venue+Image';
+    }
+    
+    // If it's already a full URL, return it
+    if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+        console.log('✅ Already a full URL:', imagePath);
+        return imagePath;
+    }
+    
+    // Remove any quotes or brackets
+    let cleanPath = imagePath.replace(/['"\[\]]/g, '');
+    
+    // If it's a relative path starting with /uploads/, add base URL
+    if (cleanPath.startsWith('/uploads/')) {
+        const url = `http://localhost:5000${cleanPath}`;
+        console.log('✅ Constructed URL from relative path:', url);
+        return url;
+    }
+    
+    // If it's just a filename, construct the full path
+    if (cleanPath && cleanPath.includes('.')) {
+        const url = `http://localhost:5000/uploads/venues/${cleanPath}`;
+        console.log('✅ Constructed URL from filename:', url);
+        return url;
+    }
+    
+    console.log('⚠️ Could not parse image path, using placeholder');
+    return 'https://via.placeholder.com/800x400?text=Venue+Image';
 };
 
 // ==================== BASIC ROUTES ====================
@@ -289,31 +358,32 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 // ==================== VENUE MANAGEMENT ROUTES ====================
-// IMPORTANT: These are updated with proper image handling
 
 app.get('/api/admin/venues', async (req, res) => {
     try {
         const [venues] = await db.execute(`
             SELECT 
-                venue_ID,
-                venue_Name,
-                address,
-                capacity,
-                price,
-                contact_Email,
-                contact_Phone,
-                description,
-                images,
-                is_Available,
-                date_Created
-            FROM VENUE 
-            ORDER BY venue_Name
+                v.venue_ID,
+                v.venue_Name,
+                v.address,
+                v.capacity,
+                v.price,
+                v.contact_Email,
+                v.contact_Phone,
+                v.description,
+                v.is_Available,
+                v.date_Created,
+                GROUP_CONCAT(vi.image_url) as image_urls
+            FROM VENUE v
+            LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
+            GROUP BY v.venue_ID
+            ORDER BY v.venue_Name
         `);
         
         // Use helper function to parse images
         const venuesWithParsedImages = venues.map(venue => ({
             ...venue,
-            images: parseImagesField(venue.images)
+            images: parseImagesField(venue.image_urls)
         }));
         
         res.json(venuesWithParsedImages);
@@ -327,7 +397,13 @@ app.get('/api/admin/venues/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const [venues] = await db.execute(`
-            SELECT * FROM VENUE WHERE venue_ID = ?
+            SELECT 
+                v.*,
+                GROUP_CONCAT(vi.image_url) as image_urls
+            FROM VENUE v
+            LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
+            WHERE v.venue_ID = ?
+            GROUP BY v.venue_ID
         `, [id]);
         
         if (venues.length === 0) {
@@ -336,7 +412,7 @@ app.get('/api/admin/venues/:id', async (req, res) => {
         
         const venueWithImages = {
             ...venues[0],
-            images: parseImagesField(venues[0].images)
+            images: parseImagesField(venues[0].image_urls)
         };
         
         res.json(venueWithImages);
@@ -372,45 +448,72 @@ app.post('/api/admin/venues', async (req, res) => {
         const imagesArray = parseImagesField(images);
         console.log('🖼️ Parsed images array:', imagesArray);
 
-        // Prepare images for storage
-        let imagesForDB = null;
-        if (imagesArray.length > 0) {
-            imagesForDB = JSON.stringify(imagesArray);
+        // Start transaction
+        const connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            // Insert venue
+            const [result] = await connection.execute(
+                `INSERT INTO VENUE 
+                    (venue_Name, address, capacity, price, contact_Email, contact_Phone, description, is_Available) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)`,
+                [
+                    venue_Name, 
+                    address, 
+                    parseInt(capacity), 
+                    parseFloat(price), 
+                    contact_Email || null, 
+                    contact_Phone || null, 
+                    description || null
+                ]
+            );
+
+            const venueId = result.insertId;
+            console.log(`✅ Venue created with ID: ${venueId}`);
+
+            // Insert images into venue_images table
+            if (imagesArray.length > 0) {
+                for (const imageUrl of imagesArray) {
+                    await connection.execute(
+                        `INSERT INTO venue_images (venue_ID, image_url) VALUES (?, ?)`,
+                        [venueId, imageUrl]
+                    );
+                }
+                console.log(`✅ Added ${imagesArray.length} images to venue_images table`);
+            }
+
+            // Commit transaction
+            await connection.commit();
+            connection.release();
+
+            // Get the newly created venue with images
+            const [newVenue] = await db.execute(`
+                SELECT 
+                    v.*,
+                    GROUP_CONCAT(vi.image_url) as image_urls
+                FROM VENUE v
+                LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
+                WHERE v.venue_ID = ?
+                GROUP BY v.venue_ID
+            `, [venueId]);
+
+            const venueWithImages = {
+                ...newVenue[0],
+                images: parseImagesField(newVenue[0].image_urls)
+            };
+
+            res.status(201).json({
+                message: 'Venue created successfully',
+                venue: venueWithImages
+            });
+
+        } catch (error) {
+            // Rollback on error
+            await connection.rollback();
+            connection.release();
+            throw error;
         }
-
-        console.log('💾 Storing images in DB:', imagesForDB);
-
-        const [result] = await db.execute(
-            `INSERT INTO VENUE 
-                (venue_Name, address, capacity, price, contact_Email, contact_Phone, description, images, is_Available) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
-            [
-                venue_Name, 
-                address, 
-                parseInt(capacity), 
-                parseFloat(price), 
-                contact_Email || null, 
-                contact_Phone || null, 
-                description || null,
-                imagesForDB
-            ]
-        );
-
-        // Get the newly created venue
-        const [newVenue] = await db.execute(
-            'SELECT * FROM VENUE WHERE venue_ID = ?',
-            [result.insertId]
-        );
-
-        const venueWithImages = {
-            ...newVenue[0],
-            images: parseImagesField(newVenue[0].images)
-        };
-
-        res.status(201).json({
-            message: 'Venue created successfully',
-            venue: venueWithImages
-        });
     } catch (error) {
         console.error('❌ Error creating venue:', error);
         res.status(500).json({ 
@@ -449,53 +552,83 @@ app.put('/api/admin/venues/:id', async (req, res) => {
 
         // Parse images using helper function
         const imagesArray = parseImagesField(images);
-        let imagesForDB = null;
-        if (imagesArray.length > 0) {
-            imagesForDB = JSON.stringify(imagesArray);
+
+        // Start transaction
+        const connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            // Update venue info
+            await connection.execute(
+                `UPDATE VENUE SET 
+                    venue_Name = ?,
+                    address = ?,
+                    capacity = ?,
+                    price = ?,
+                    contact_Email = ?,
+                    contact_Phone = ?,
+                    description = ?,
+                    is_Available = ?
+                WHERE venue_ID = ?`,
+                [
+                    venue_Name, 
+                    address, 
+                    parseInt(capacity), 
+                    parseFloat(price), 
+                    contact_Email || null, 
+                    contact_Phone || null, 
+                    description || null,
+                    is_Available !== undefined ? is_Available : true,
+                    id
+                ]
+            );
+
+            // Clear existing images from venue_images table
+            await connection.execute('DELETE FROM venue_images WHERE venue_ID = ?', [id]);
+            console.log(`🗑️ Cleared existing images for venue ${id}`);
+
+            // Insert new images into venue_images table
+            if (imagesArray.length > 0) {
+                for (const imageUrl of imagesArray) {
+                    await connection.execute(
+                        `INSERT INTO venue_images (venue_ID, image_url) VALUES (?, ?)`,
+                        [id, imageUrl]
+                    );
+                }
+                console.log(`✅ Added ${imagesArray.length} new images to venue_images table`);
+            }
+
+            // Commit transaction
+            await connection.commit();
+            connection.release();
+
+            // Get updated venue with images
+            const [updatedVenue] = await db.execute(`
+                SELECT 
+                    v.*,
+                    GROUP_CONCAT(vi.image_url) as image_urls
+                FROM VENUE v
+                LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
+                WHERE v.venue_ID = ?
+                GROUP BY v.venue_ID
+            `, [id]);
+
+            const venueWithImages = {
+                ...updatedVenue[0],
+                images: parseImagesField(updatedVenue[0].image_urls)
+            };
+
+            res.json({
+                message: 'Venue updated successfully',
+                venue: venueWithImages
+            });
+
+        } catch (error) {
+            // Rollback on error
+            await connection.rollback();
+            connection.release();
+            throw error;
         }
-
-        // Update venue
-        await db.execute(
-            `UPDATE VENUE SET 
-                venue_Name = ?,
-                address = ?,
-                capacity = ?,
-                price = ?,
-                contact_Email = ?,
-                contact_Phone = ?,
-                description = ?,
-                images = ?,
-                is_Available = ?
-            WHERE venue_ID = ?`,
-            [
-                venue_Name, 
-                address, 
-                parseInt(capacity), 
-                parseFloat(price), 
-                contact_Email || null, 
-                contact_Phone || null, 
-                description || null,
-                imagesForDB,
-                is_Available !== undefined ? is_Available : true,
-                id
-            ]
-        );
-
-        // Get updated venue
-        const [updatedVenue] = await db.execute(
-            'SELECT * FROM VENUE WHERE venue_ID = ?',
-            [id]
-        );
-
-        const venueWithImages = {
-            ...updatedVenue[0],
-            images: parseImagesField(updatedVenue[0].images)
-        };
-
-        res.json({
-            message: 'Venue updated successfully',
-            venue: venueWithImages
-        });
     } catch (error) {
         console.error('Error updating venue:', error);
         res.status(500).json({ 
@@ -528,6 +661,8 @@ app.delete('/api/admin/venues/:id', async (req, res) => {
             });
         }
 
+        // Delete from venue_images first (foreign key constraint)
+        await db.execute('DELETE FROM venue_images WHERE venue_ID = ?', [id]);
         await db.execute('DELETE FROM VENUE WHERE venue_ID = ?', [id]);
 
         res.json({ message: 'Venue deleted successfully' });
@@ -606,7 +741,6 @@ app.post('/api/admin/venues/upload/single', upload.single('image'), async (req, 
 
 // ==================== SQL ANALYZER ROUTES ====================
 
-// Execute SQL query with better error handling
 app.post('/api/admin/database/query', async (req, res) => {
     try {
         const { query } = req.body;
@@ -658,7 +792,6 @@ app.post('/api/admin/database/query', async (req, res) => {
     }
 });
 
-// Get database schema for sidebar
 app.get('/api/admin/database/schema-info', async (req, res) => {
     try {
         const [tables] = await db.execute(`
@@ -696,8 +829,6 @@ app.get('/api/admin/database/schema-info', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch database schema' });
     }
 });
-
-
 
 // ==================== USER MANAGEMENT ROUTES ====================
 
@@ -1053,26 +1184,26 @@ app.post('/api/test/upload', upload.single('testImage'), (req, res) => {
         file: req.file
     });
 });
+
 // ==================== PUBLIC VENUE ROUTES (for user frontend) ====================
 
-// Get all venues (for user frontend)
+// Get all venues (for user frontend offers page)
 app.get('/api/venues', async (req, res) => {
     try {
-        console.log('📥 Fetching venues for frontend...');
+        console.log('📥 Fetching venues for frontend offers page...');
         
-        // Query to get venues with their images from venue_images table
         const [venues] = await db.execute(`
             SELECT 
-                v.venue_ID,
-                v.venue_Name,
+                v.venue_ID as id,
+                v.venue_Name as title,
                 v.address,
                 v.capacity,
                 v.price,
-                v.contact_Email,
-                v.contact_Phone,
+                v.contact_Email as contact_email,
+                v.contact_Phone as contact_phone,
                 v.description,
-                v.is_Available,
-                v.date_Created,
+                v.is_Available as is_available,
+                v.date_Created as created_at,
                 GROUP_CONCAT(vi.image_url) as image_urls
             FROM VENUE v
             LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
@@ -1081,54 +1212,52 @@ app.get('/api/venues', async (req, res) => {
             ORDER BY v.date_Created DESC
         `);
         
-        console.log(`✅ Found ${venues.length} venues`);
+        console.log(`✅ Found ${venues.length} venues for offers page`);
         
-        // Parse images from comma-separated string to array
-        // In the /api/venues route, update this section:
-const formattedVenues = venues.map(venue => {
-    const images = venue.image_urls ? 
-        venue.image_urls.split(',').filter(img => img.trim()) : 
-        [];
-    
-    // FIXED: Ensure proper image URLs
-    const imageUrls = images.map(img => {
-        // Remove any leading/trailing spaces
-        const cleanImg = img.trim();
-        // If it already has http:// or https://, keep it
-        if (cleanImg.startsWith('http')) {
-            return cleanImg;
-        }
-        // If it starts with /uploads/, add the full URL
-        if (cleanImg.startsWith('/uploads/')) {
-            return `http://localhost:5000${cleanImg}`;
-        }
-        // Otherwise, assume it's a relative path
-        return `http://localhost:5000/uploads/venues/${cleanImg}`;
-    });
-    
-    const mainImage = imageUrls.length > 0 ? 
-        imageUrls[0] : 
-        'https://via.placeholder.com/400x250?text=No+Image';
-    
-    return {
-        id: venue.venue_ID,
-        title: venue.venue_Name,
-        address: venue.address,
-        description: venue.description || 'No description available',
-        price: parseFloat(venue.price),
-        capacity: venue.capacity,
-        contact_email: venue.contact_Email,
-        contact_phone: venue.contact_Phone,
-        is_available: venue.is_Available,
-        created_at: venue.date_Created,
-        image: mainImage,
-        all_images: imageUrls
-    };
-});
+        const formattedVenues = venues.map(venue => {
+            const images = venue.image_urls ? 
+                venue.image_urls.split(',').filter(img => img.trim()) : 
+                [];
+            
+            // FIXED: Ensure proper image URLs
+            const imageUrls = images.map(img => {
+                // Remove any leading/trailing spaces
+                const cleanImg = img.trim();
+                // If it already has http:// or https://, keep it
+                if (cleanImg.startsWith('http')) {
+                    return cleanImg;
+                }
+                // If it starts with /uploads/, add the full URL
+                if (cleanImg.startsWith('/uploads/')) {
+                    return `http://localhost:5000${cleanImg}`;
+                }
+                // Otherwise, assume it's a relative path
+                return `http://localhost:5000/uploads/venues/${cleanImg}`;
+            });
+            
+            const mainImage = imageUrls.length > 0 ? 
+                imageUrls[0] : 
+                'https://via.placeholder.com/400x250?text=No+Image';
+            
+            return {
+                id: venue.id,
+                title: venue.title,
+                address: venue.address,
+                description: venue.description || 'No description available',
+                price: parseFloat(venue.price),
+                capacity: venue.capacity,
+                contact_email: venue.contact_email,
+                contact_phone: venue.contact_phone,
+                is_available: venue.is_available,
+                created_at: venue.created_at,
+                image: mainImage,
+                all_images: imageUrls
+            };
+        });
         
         res.json(formattedVenues);
     } catch (error) {
-        console.error('❌ Error fetching venues:', error);
+        console.error('❌ Error fetching venues for offers:', error);
         res.status(500).json({ 
             error: 'Failed to fetch venues',
             details: error.message 
@@ -1136,7 +1265,127 @@ const formattedVenues = venues.map(venue => {
     }
 });
 
-// Get a single venue by ID
+// ==================== POPULAR VENUE ROUTE ====================
+
+app.get('/api/venues/popular', async (req, res) => {
+    try {
+        console.log('🏆 Fetching popular venue...');
+        
+        // Get venue with most bookings
+        const [popularVenue] = await db.execute(`
+            SELECT 
+                v.venue_ID,
+                v.venue_Name,
+                v.address,
+                v.capacity,
+                v.price,
+                v.description,
+                v.contact_Email,
+                v.contact_Phone,
+                v.is_Available,
+                v.date_Created,
+                COUNT(b.booking_ID) as booking_count,
+                GROUP_CONCAT(vi.image_url) as image_urls
+            FROM VENUE v
+            LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
+            LEFT JOIN BOOKING b ON v.venue_ID = b.venue_ID
+            WHERE v.is_Available = 1
+            GROUP BY v.venue_ID
+            ORDER BY booking_count DESC
+            LIMIT 1
+        `);
+        
+        if (popularVenue.length === 0) {
+            // Fallback: Get a random available venue if no bookings exist
+            const [fallbackVenue] = await db.execute(`
+                SELECT 
+                    v.*,
+                    GROUP_CONCAT(vi.image_url) as image_urls
+                FROM VENUE v
+                LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
+                WHERE v.is_Available = 1
+                GROUP BY v.venue_ID
+                ORDER BY RAND()
+                LIMIT 1
+            `);
+            
+            if (fallbackVenue.length === 0) {
+                return res.status(404).json({ 
+                    error: 'No venues available' 
+                });
+            }
+            
+            const venue = fallbackVenue[0];
+            const images = venue.image_urls ? 
+                venue.image_urls.split(',').filter(img => img.trim()) : 
+                [];
+            
+            const imageUrls = images.map(img => ensureImageUrl(img));
+            const mainImage = imageUrls.length > 0 ? 
+                imageUrls[0] : 
+                'https://via.placeholder.com/800x400?text=Venue+Image';
+            
+            const response = {
+                id: venue.venue_ID,
+                name: venue.venue_Name,
+                address: venue.address,
+                description: venue.description || 'A premium venue for your events',
+                capacity: venue.capacity,
+                price_per_hour: parseFloat(venue.price),
+                contact_email: venue.contact_Email,
+                contact_phone: venue.contact_Phone,
+                location: venue.address.split(',')[0] || venue.address,
+                is_available: venue.is_Available,
+                image: mainImage,
+                all_images: imageUrls,
+                booking_count: 0,
+                reason: 'Featured venue (no bookings yet)'
+            };
+            
+            console.log(`✅ Returning fallback venue: ${response.name}`);
+            return res.json(response);
+        }
+        
+        const venue = popularVenue[0];
+        const images = venue.image_urls ? 
+            venue.image_urls.split(',').filter(img => img.trim()) : 
+            [];
+        
+        const imageUrls = images.map(img => ensureImageUrl(img));
+        const mainImage = imageUrls.length > 0 ? 
+            imageUrls[0] : 
+            'https://via.placeholder.com/800x400?text=Venue+Image';
+        
+        const response = {
+            id: venue.venue_ID,
+            name: venue.venue_Name,
+            address: venue.address,
+            description: venue.description || 'A premium venue for your events',
+            capacity: venue.capacity,
+            price_per_hour: parseFloat(venue.price),
+            contact_email: venue.contact_Email,
+            contact_phone: venue.contact_Phone,
+            location: venue.address.split(',')[0] || venue.address,
+            is_available: venue.is_Available,
+            image: mainImage,
+            all_images: imageUrls,
+            booking_count: venue.booking_count || 0,
+            reason: 'Most booked venue'
+        };
+        
+        console.log(`✅ Popular venue found: ${response.name} (${response.booking_count} bookings)`);
+        res.json(response);
+        
+    } catch (error) {
+        console.error('❌ Error fetching popular venue:', error);
+        res.status(500).json({ 
+            error: 'Failed to fetch popular venue',
+            details: error.message 
+        });
+    }
+});
+
+// Get venue by ID for details page
 app.get('/api/venues/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -1172,9 +1421,9 @@ app.get('/api/venues/:id', async (req, res) => {
             contact_phone: venue.contact_Phone,
             is_available: venue.is_Available,
             created_at: venue.date_Created,
-            images: images.map(img => `http://localhost:5000${img}`),
+            images: images.map(img => ensureImageUrl(img)),
             main_image: images.length > 0 ? 
-                `http://localhost:5000${images[0]}` : 
+                ensureImageUrl(images[0]) : 
                 'https://via.placeholder.com/400x250?text=No+Image'
         };
         
@@ -1219,8 +1468,9 @@ app.get('/api/venues/search', async (req, res) => {
                 venue.image_urls.split(',').filter(img => img.trim()) : 
                 [];
             
-            const mainImage = images.length > 0 ? 
-                `http://localhost:5000${images[0]}` : 
+            const imageUrls = images.map(img => ensureImageUrl(img));
+            const mainImage = imageUrls.length > 0 ? 
+                imageUrls[0] : 
                 'https://via.placeholder.com/400x250?text=No+Image';
             
             return {
@@ -1235,7 +1485,7 @@ app.get('/api/venues/search', async (req, res) => {
                 is_available: venue.is_Available,
                 created_at: venue.date_Created,
                 image: mainImage,
-                all_images: images.map(img => `http://localhost:5000${img}`)
+                all_images: imageUrls
             };
         });
         
@@ -1249,7 +1499,7 @@ app.get('/api/venues/search', async (req, res) => {
     }
 });
 
-// Get popular/featured venues (optional)
+// Get featured venues
 app.get('/api/venues/featured', async (req, res) => {
     try {
         console.log('⭐ Fetching featured venues...');
@@ -1275,8 +1525,9 @@ app.get('/api/venues/featured', async (req, res) => {
                 venue.image_urls.split(',').filter(img => img.trim()) : 
                 [];
             
-            const mainImage = images.length > 0 ? 
-                `http://localhost:5000${images[0]}` : 
+            const imageUrls = images.map(img => ensureImageUrl(img));
+            const mainImage = imageUrls.length > 0 ? 
+                imageUrls[0] : 
                 'https://via.placeholder.com/400x250?text=No+Image';
             
             return {
@@ -1305,235 +1556,6 @@ app.get('/api/venues/featured', async (req, res) => {
     }
 });
 
-// ==================== UPDATE CORS FOR BOTH FRONTENDS ====================
-
-// In backend/server.js, update the CORS configuration:
-app.use(cors({
-    origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:3001'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
-}));
-
-// ==================== UPDATE ADMIN VENUE ROUTES ====================
-
-// Update your existing POST /api/admin/venues route to also save to venue_images table
-app.post('/api/admin/venues', async (req, res) => {
-    try {
-        console.log('📥 Creating venue with data:', req.body);
-        
-        const { 
-            venue_Name, 
-            address, 
-            capacity, 
-            price, 
-            contact_Email, 
-            contact_Phone, 
-            description,
-            images 
-        } = req.body;
-
-        // Validate required fields
-        if (!venue_Name || !address || !capacity || !price) {
-            return res.status(400).json({ 
-                error: 'Name, address, capacity, and price are required'
-            });
-        }
-
-        // Parse images using helper function
-        const imagesArray = parseImagesField(images);
-        console.log('🖼️ Parsed images array:', imagesArray);
-
-        // Start transaction
-        const connection = await db.getConnection();
-        await connection.beginTransaction();
-
-        try {
-            // Insert venue
-            const [result] = await connection.execute(
-                `INSERT INTO VENUE 
-                    (venue_Name, address, capacity, price, contact_Email, contact_Phone, description, is_Available) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)`,
-                [
-                    venue_Name, 
-                    address, 
-                    parseInt(capacity), 
-                    parseFloat(price), 
-                    contact_Email || null, 
-                    contact_Phone || null, 
-                    description || null
-                ]
-            );
-
-            const venueId = result.insertId;
-            console.log(`✅ Venue created with ID: ${venueId}`);
-
-            // Insert images into venue_images table
-            if (imagesArray.length > 0) {
-                for (const imageUrl of imagesArray) {
-                    await connection.execute(
-                        `INSERT INTO venue_images (venue_ID, image_url) VALUES (?, ?)`,
-                        [venueId, imageUrl]
-                    );
-                }
-                console.log(`✅ Added ${imagesArray.length} images to venue_images table`);
-            }
-
-            // Commit transaction
-            await connection.commit();
-            connection.release();
-
-            // Get the newly created venue with images
-            const [newVenue] = await db.execute(`
-                SELECT 
-                    v.*,
-                    GROUP_CONCAT(vi.image_url) as image_urls
-                FROM VENUE v
-                LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
-                WHERE v.venue_ID = ?
-                GROUP BY v.venue_ID
-            `, [venueId]);
-
-            const venueWithImages = {
-                ...newVenue[0],
-                images: parseImagesField(newVenue[0].image_urls)
-            };
-
-            res.status(201).json({
-                message: 'Venue created successfully',
-                venue: venueWithImages
-            });
-
-        } catch (error) {
-            // Rollback on error
-            await connection.rollback();
-            connection.release();
-            throw error;
-        }
-    } catch (error) {
-        console.error('❌ Error creating venue:', error);
-        res.status(500).json({ 
-            error: 'Internal server error: ' + error.message,
-            sqlMessage: error.sqlMessage
-        });
-    }
-});
-
-// Also update your PUT /api/admin/venues/:id route similarly to handle venue_images table
-app.put('/api/admin/venues/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        console.log('📝 Updating venue:', id, req.body);
-
-        // Check if venue exists
-        const [existing] = await db.execute(
-            'SELECT venue_ID FROM VENUE WHERE venue_ID = ?',
-            [id]
-        );
-        
-        if (existing.length === 0) {
-            return res.status(404).json({ error: 'Venue not found' });
-        }
-
-        const { 
-            venue_Name, 
-            address, 
-            capacity, 
-            price, 
-            contact_Email, 
-            contact_Phone, 
-            description,
-            images,
-            is_Available 
-        } = req.body;
-
-        // Parse images using helper function
-        const imagesArray = parseImagesField(images);
-
-        // Start transaction
-        const connection = await db.getConnection();
-        await connection.beginTransaction();
-
-        try {
-            // Update venue info
-            await connection.execute(
-                `UPDATE VENUE SET 
-                    venue_Name = ?,
-                    address = ?,
-                    capacity = ?,
-                    price = ?,
-                    contact_Email = ?,
-                    contact_Phone = ?,
-                    description = ?,
-                    is_Available = ?
-                WHERE venue_ID = ?`,
-                [
-                    venue_Name, 
-                    address, 
-                    parseInt(capacity), 
-                    parseFloat(price), 
-                    contact_Email || null, 
-                    contact_Phone || null, 
-                    description || null,
-                    is_Available !== undefined ? is_Available : true,
-                    id
-                ]
-            );
-
-            // Clear existing images from venue_images table
-            await connection.execute('DELETE FROM venue_images WHERE venue_ID = ?', [id]);
-            console.log(`🗑️ Cleared existing images for venue ${id}`);
-
-            // Insert new images into venue_images table
-            if (imagesArray.length > 0) {
-                for (const imageUrl of imagesArray) {
-                    await connection.execute(
-                        `INSERT INTO venue_images (venue_ID, image_url) VALUES (?, ?)`,
-                        [id, imageUrl]
-                    );
-                }
-                console.log(`✅ Added ${imagesArray.length} new images to venue_images table`);
-            }
-
-            // Commit transaction
-            await connection.commit();
-            connection.release();
-
-            // Get updated venue with images
-            const [updatedVenue] = await db.execute(`
-                SELECT 
-                    v.*,
-                    GROUP_CONCAT(vi.image_url) as image_urls
-                FROM VENUE v
-                LEFT JOIN venue_images vi ON v.venue_ID = vi.venue_ID
-                WHERE v.venue_ID = ?
-                GROUP BY v.venue_ID
-            `, [id]);
-
-            const venueWithImages = {
-                ...updatedVenue[0],
-                images: parseImagesField(updatedVenue[0].image_urls)
-            };
-
-            res.json({
-                message: 'Venue updated successfully',
-                venue: venueWithImages
-            });
-
-        } catch (error) {
-            // Rollback on error
-            await connection.rollback();
-            connection.release();
-            throw error;
-        }
-    } catch (error) {
-        console.error('Error updating venue:', error);
-        res.status(500).json({ 
-            error: 'Internal server error: ' + error.message
-        });
-    }
-});
-
 // ==================== ERROR HANDLING ====================
 
 app.use((req, res, next) => {
@@ -1558,11 +1580,6 @@ if (!fs.existsSync(uploadsDir)) {
     console.log(`📁 Created uploads directory: ${uploadsDir}`);
 }
 
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
-    console.log(`📁 Static files: http://localhost:${PORT}/uploads/`);
-    console.log(`📁 Uploads directory: ${uploadsDir}`);
-});
 // Debug endpoint to check uploaded files
 app.get('/api/debug/uploads', (req, res) => {
     const uploadsDir = path.join(__dirname, 'public', 'uploads', 'venues');
@@ -1586,8 +1603,6 @@ app.get('/api/debug/uploads', (req, res) => {
         });
     });
 });
-
-
 
 // Test image upload endpoint
 app.post('/api/test/upload-debug', upload.single('image'), (req, res) => {
@@ -1642,4 +1657,10 @@ app.get('/api/uploads/list', (req, res) => {
             files: fileDetails
         });
     });
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`📁 Static files: http://localhost:${PORT}/uploads/`);
+    console.log(`📁 Uploads directory: ${uploadsDir}`);
 });
