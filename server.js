@@ -14,12 +14,17 @@ const PORT = 5000;
 
 // 1. First, enable CORS with proper configuration
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:3001', 'https://www.venunease.site'],
+    origin: [
+        'http://localhost:5173', 
+        'http://localhost:3000', 
+        'http://localhost:3001', 
+        'https://www.venunease.site',
+        'https://hipolito-semimoderate-kandy.ngrok-free.dev'  // ADD THIS LINE
+    ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
 }));
-
 // 2. Configure static file serving BEFORE body parsers
 app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
 
